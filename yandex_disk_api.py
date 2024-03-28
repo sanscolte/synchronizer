@@ -1,25 +1,30 @@
 import os
-from typing import Dict, Any, BinaryIO
+from typing import Dict, Any, BinaryIO, List
 
 import requests
-
-from dotenv_reader import read_env
+from loguru import logger
+from requests import Response
 
 
 class YandexDiskAPI:
-    """ Класс для отправки запросов к API Яндекс Диска """
-    def __init__(self, token: str, folder_path: str) -> None:
+    """Класс для отправки запросов к API Яндекс Диска"""
+
+    def __init__(self, token: str, cloud_folder: str) -> None:
         """
         :param token: OAuth токен Яндекс Диска
-        :param folder_path: Путь к папке в облачном хранилище
+        :param cloud_folder: Путь к папке в облачном хранилище
         """
         self.token: str = token
-        self.folder_path: str = folder_path
+        self.cloud_folder: str = cloud_folder
         self.base_url: str = "https://cloud-api.yandex.net/v1/disk"
 
     def _make_request(
-            self, method: str, endpoint: str, params: Dict[str, Any] = None, data: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+        self,
+        method: str,
+        endpoint: str,
+        params: Dict[str, Any] = None,
+        data: Dict[str, Any] = None,
+    ) -> [Dict[str, Any], int]:
         """
         Метод отправки запроса
         :param method: HTTP-метод запроса
@@ -30,44 +35,77 @@ class YandexDiskAPI:
         """
         headers: Dict[str, str] = {"Authorization": f"OAuth {self.token}"}
         url: str = f"{self.base_url}{endpoint}"
-        response = requests.request(method, url, headers=headers, params=params, data=data)
-        print(response)
-        response.raise_for_status()  # Raise an exception for bad response status
-        return response.json()
+        response: Response = requests.request(
+            method, url, headers=headers, params=params, files=data
+        )
 
-    def synchronize_initial(self, local_path: str):
+        response.raise_for_status()
+
+        if response.text:
+            return response.json(), response.status_code
+
+    def synchronize_initial(self, local_folder: str) -> None:
         """
-
-        :return:
+        Метод первичной синхронизации с облаком
+        :param local_folder: Путь к локальной папке
+        :return: None
         """
-        endpoint: str = f"/resources?path={self.folder_path}"
-        response = self._make_request("GET", endpoint)
-        files = response["_embedded"]["items"]
-        filenames = [file["name"] for file in files]
+        try:
+            logger.info(f"Первичная синхронизация папки {local_folder}")
 
-        for filename in filenames:
-            self.delete(filename)
+            endpoint: str = f"/resources?path={self.cloud_folder}"
+            response: Dict[str, Any] = self._make_request("GET", endpoint)[0]
+            files: List[Dict[str, Any]] = response["_embedded"]["items"]
+            filenames: List[str] = [file["name"] for file in files]
+            for filename in filenames:
+                self.delete(filename)
 
-        local_files = [f for f in os.listdir(local_path) if os.path.isfile(os.path.join(local_path, f))]
-        print(local_files)
-        for local_file in local_files:
-            self.load_or_reload(os.path.join(local_path, local_file), overwrite=True)
+            try:
+                local_files: List[str] = [
+                    f
+                    for f in os.listdir(local_folder)
+                    if os.path.isfile(os.path.join(local_folder, f))
+                    and f != ".DS_Store"
+                ]
+                for local_file in local_files:
+                    self.load_or_reload(
+                        os.path.join(local_folder, local_file), overwrite=False
+                    )
+            except FileNotFoundError:
+                logger.error(f"Ошибка: локальной папки {local_folder} не существует")
+        except Exception as e:
+            logger.error(f"Ошибка синхронизации {local_folder}: {e}")
 
-    def load_or_reload(self, local_path: str, overwrite: bool) -> None:
+    def load_or_reload(self, local_folder: str, overwrite: bool) -> None:
         """
         Объединенный метод загрузки/перезаписи файла
-        :param local_path: Путь к локальному файлу
+        :param local_folder: Путь к локальной папке
         :param overwrite: Перезаписывать файл или нет
         :return: None
         """
-        endpoint: str = "/resources/upload"
-        params: Dict[str, str] = {
-            "path": f"{self.folder_path}/{os.path.basename(local_path)}",
-            "overwrite": str(overwrite).lower()
-        }
-        files: Dict[str, BinaryIO] = {"file": open(local_path, "rb")}
-        print(files)
-        self._make_request("POST", endpoint, params=params, data=files)
+        try:
+            endpoint: str = "/resources/upload"
+            params: Dict[str, str] = {
+                "path": f"{self.cloud_folder}/{os.path.basename(local_folder)}",
+                "overwrite": str(overwrite).lower(),
+            }
+            response: Dict[str, Any] = self._make_request(
+                "GET", endpoint, params=params
+            )[0]
+            upload_link: str = response["href"]
+            files: Dict[str, BinaryIO] = {"file": open(local_folder, "rb")}
+            requests.put(upload_link, files=files)
+
+            if overwrite:
+                logger.info(f"Перезаписан файл {local_folder}")
+            else:
+                logger.info(f"Загружен файл {local_folder}")
+
+        except Exception as e:
+            if overwrite:
+                logger.error(f"Ошибка перезаписи {local_folder}: {e}")
+            else:
+                logger.error(f"Ошибка загрузки {local_folder}: {e}")
 
     def delete(self, filename: str) -> None:
         """
@@ -75,22 +113,25 @@ class YandexDiskAPI:
         :param filename: Имя файла
         :return: None
         """
-        endpoint: str = f"/resources?path={self.folder_path}/{filename}"
-        self._make_request("DELETE", endpoint)
+        try:
+            endpoint: str = f"/resources?path={self.cloud_folder}/{filename}"
+            self._make_request("DELETE", endpoint)
+            logger.info(f"Удален файл {filename}")
+
+        except Exception as e:
+            logger.error(f"Ошибка удалении {filename}: {e}")
 
     def get_info(self) -> Dict[str, Any]:
         """
         Метод получения информации о хранящихся файлах
         :return: JSON ответ запроса
         """
-        endpoint: str = f"/resources?path={self.folder_path}"
-        return self._make_request("GET", endpoint)
+        try:
+            endpoint: str = f"/resources?path={self.cloud_folder}"
+            logger.info(f"Получена информация о папке {self.cloud_folder}")
+            return self._make_request("GET", endpoint)
 
-
-envs = read_env()
-token = envs["YANDEX_DISK_TOKEN"]
-folder = envs["CLOUD_FOLDER"]
-api = YandexDiskAPI(token, folder)
-# print(api.get_info())
-# api.synchronize_initial('/Users/timofey/Новая папка')
-api.load_or_reload('/Users/timofey/new_folder/chatgpt_code.txt', overwrite=True)
+        except Exception as e:
+            logger.error(
+                f"Ошибка получения информации о папке {self.cloud_folder}: {e}"
+            )

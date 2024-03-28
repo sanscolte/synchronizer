@@ -7,4 +7,8 @@ def setup_logger(log_file: str) -> None:
     :param log_file: Путь к файлу лога
     :return: None
     """
-    logger.add(log_file, rotation="500 MB", level="INFO")
+    logger.add(
+        log_file,
+        format="{time:YYYY-MM-DD HH:mm:ss} - {level} - {message}",
+        level="INFO",
+    )
